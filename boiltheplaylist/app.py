@@ -46,6 +46,23 @@ def _load_prompt() -> str:
     return PROMPT_PATH.read_text(encoding="utf-8")
 
 
+def _openai_error_message_from_body(body: bytes) -> str:
+    text = body.decode(errors="replace").strip()
+    if not text:
+        return "Unknown error"
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    if isinstance(payload, dict):
+        error = payload.get("error") or {}
+        if isinstance(error, dict):
+            message = error.get("message")
+            if message:
+                return str(message)
+    return text
+
+
 def _get_redirect_uri(request: Request) -> str:
     configured = os.getenv("SPOTIFY_REDIRECT_URI")
     if configured:
@@ -359,7 +376,16 @@ async def generate_stream(
                 headers=headers,
                 json=payload_body,
             ) as response:
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    body = await response.aread()
+                    message = _openai_error_message_from_body(body)
+                    yield _sse(
+                        "error",
+                        {
+                            "message": f"OpenAI API error ({response.status_code}): {message}"
+                        },
+                    )
+                    return
                 async for line in response.aiter_lines():
                     if not line.startswith("data: "):
                         continue

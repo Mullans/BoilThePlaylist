@@ -195,10 +195,14 @@ class OpenAIClient(LLMClient):
                 headers=headers,
                 json=payload,
             )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                message = _openai_error_message(response)
+                raise RuntimeError(
+                    f"OpenAI API error ({response.status_code}): {message}"
+                )
             data = response.json()
 
-        content = data.get("output_text", "")
+        content = _response_output_text(data)
         parsed = _parse_llm_output(content)
 
         if not parsed.sequence:
@@ -218,6 +222,40 @@ class OpenAIClient(LLMClient):
             playlist_title=parsed.playlist_title,
             raw_text=content,
         )
+
+
+def _openai_error_message(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except json.JSONDecodeError:
+        return response.text.strip() or "Unknown error"
+    if isinstance(payload, dict):
+        error = payload.get("error") or {}
+        if isinstance(error, dict):
+            message = error.get("message")
+            if message:
+                return str(message)
+    return response.text.strip() or "Unknown error"
+
+
+def _response_output_text(payload: dict[str, Any]) -> str:
+    text = payload.get("output_text")
+    if isinstance(text, str) and text:
+        return text
+    output = payload.get("output") or []
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content") or []
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "output_text":
+                    return str(part.get("text") or "")
+    return ""
 
 
 def _parse_llm_output(text: str) -> LLMResult:
