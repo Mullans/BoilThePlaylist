@@ -23,10 +23,16 @@ from boiltheplaylist.spotify import (
 BASE_DIR = Path(__file__).resolve().parent
 PROMPT_PATH = BASE_DIR.parent / "data" / "boil_prompt.md"
 
+SESSION_SECRET = os.getenv("SESSION_SECRET")
+if not SESSION_SECRET:
+    raise RuntimeError(
+        "SESSION_SECRET environment variable must be set for session security."
+    )
+
 app = FastAPI()
 app.add_middleware(
     SessionMiddleware,
-    secret_key=os.getenv("SESSION_SECRET", "dev-session-secret"),
+    secret_key=SESSION_SECRET,
     same_site="lax",
     https_only=False,
 )
@@ -44,8 +50,9 @@ def _get_redirect_uri(request: Request) -> str:
     configured = os.getenv("SPOTIFY_REDIRECT_URI")
     if configured:
         return configured
-    fallback = str(request.url_for("spotify_callback"))
-    return fallback.replace("http://", "https://", 1)
+    fallback_url = request.url_for("spotify_callback")
+    secure_url = fallback_url.replace(scheme="https")
+    return str(secure_url)
 
 
 def _require_spotify_token(request: Request) -> dict[str, Any]:
@@ -294,47 +301,47 @@ async def generate_stream(
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-    payload_body = {
-        "model": model,
-        "input": prompt_preview,
-        "instructions": "You are a helpful music curator.",
-        "temperature": 0.8,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "boil_playlist",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "playlist_title": {"type": "string"},
-                        "arc_summary": {"type": "string"},
-                        "sequence": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "title": {"type": "string"},
-                                    "artist": {"type": "string"},
-                                    "why": {"type": "string"},
-                                    "transition": {"type": "string"},
-                                    "tags": {"type": "array", "items": {"type": "string"}},
+        payload_body = {
+            "model": model,
+            "input": prompt_preview,
+            "instructions": "You are a helpful music curator.",
+            "temperature": 0.8,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "boil_playlist",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "playlist_title": {"type": "string"},
+                            "arc_summary": {"type": "string"},
+                            "sequence": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string"},
+                                        "artist": {"type": "string"},
+                                        "why": {"type": "string"},
+                                        "transition": {"type": "string"},
+                                        "tags": {"type": "array", "items": {"type": "string"}},
+                                    },
+                                    "required": [
+                                        "title",
+                                        "artist",
+                                        "why",
+                                        "transition",
+                                        "tags",
+                                    ],
                                 },
-                                "required": [
-                                    "title",
-                                    "artist",
-                                    "why",
-                                    "transition",
-                                    "tags",
-                                ],
                             },
                         },
+                        "required": ["playlist_title", "arc_summary", "sequence"],
                     },
-                    "required": ["playlist_title", "arc_summary", "sequence"],
                 },
             },
-        },
-        "stream": True,
-    }
+            "stream": True,
+        }
         full_text = ""
 
         async with httpx.AsyncClient(timeout=None) as client:
