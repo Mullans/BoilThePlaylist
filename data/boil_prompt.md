@@ -33,7 +33,7 @@ METHOD (do this explicitly)
 5) Self-check: for each adjacent pair, give a short reason the transition works.
 6) Output requirements to encode in JSON:
    - Provide a creative playlist_title that references the songs or vibes.
-   - Include the full ordered sequence (START first, END last).
+   - Return ONLY the N intermediate tracks in order (do not include START or END).
    - For each intermediate track, include why + transition + tags.
    - Provide a fun, DJ-like arc_summary (2–4 sentences).
 
@@ -53,8 +53,8 @@ Return ONLY a JSON object with this shape (no extra prose):
   ]
 }
 Rules:
-- Include START as the first element and END as the last element.
-- Keep arc_summary casual, fun, and DJ-like (2–4 sentences).
+- The sequence must contain exactly N intermediate tracks (no START or END included).
+- Keep arc_summary casual, fun, and DJ-like (2–4 sentences). Describe the vibe and sounds of the playlist.
 
 OPTIONAL (if you have Spotify/audio-feature access)
 - Use Spotify audio features (danceability, energy, tempo, valence, acousticness, etc.)
