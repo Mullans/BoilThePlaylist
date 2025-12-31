@@ -142,15 +142,21 @@ class OpenAIClient(LLMClient):
         }
         payload = {
             "model": self.model,
-            "input": user_prompt,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": user_prompt}],
+                }
+            ],
             "instructions": "You are a helpful music curator.",
             "temperature": 0.8,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
+            "text": {
+                "format": {
+                    "type": "json_schema",
                     "name": "boil_playlist",
                     "schema": {
                         "type": "object",
+                        "additionalProperties": False,
                         "properties": {
                             "playlist_title": {"type": "string"},
                             "arc_summary": {"type": "string"},
@@ -158,6 +164,7 @@ class OpenAIClient(LLMClient):
                                 "type": "array",
                                 "items": {
                                     "type": "object",
+                                    "additionalProperties": False,
                                     "properties": {
                                         "title": {"type": "string"},
                                         "artist": {"type": "string"},
@@ -177,7 +184,8 @@ class OpenAIClient(LLMClient):
                         },
                         "required": ["playlist_title", "arc_summary", "sequence"],
                     },
-                },
+                    "strict": True,
+                }
             },
         }
 
@@ -187,10 +195,14 @@ class OpenAIClient(LLMClient):
                 headers=headers,
                 json=payload,
             )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                message = _openai_error_message(response)
+                raise RuntimeError(
+                    f"OpenAI API error ({response.status_code}): {message}"
+                )
             data = response.json()
 
-        content = data.get("output_text", "")
+        content = _response_output_text(data)
         parsed = _parse_llm_output(content)
 
         if not parsed.sequence:
@@ -210,6 +222,40 @@ class OpenAIClient(LLMClient):
             playlist_title=parsed.playlist_title,
             raw_text=content,
         )
+
+
+def _openai_error_message(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except json.JSONDecodeError:
+        return response.text.strip() or "Unknown error"
+    if isinstance(payload, dict):
+        error = payload.get("error") or {}
+        if isinstance(error, dict):
+            message = error.get("message")
+            if message:
+                return str(message)
+    return response.text.strip() or "Unknown error"
+
+
+def _response_output_text(payload: dict[str, Any]) -> str:
+    text = payload.get("output_text")
+    if isinstance(text, str) and text:
+        return text
+    output = payload.get("output") or []
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content") or []
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "output_text":
+                    return str(part.get("text") or "")
+    return ""
 
 
 def _parse_llm_output(text: str) -> LLMResult:
@@ -329,5 +375,5 @@ def get_llm_client() -> LLMClient:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("OPENAI_API_KEY is required")
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    model = os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
     return OpenAIClient(api_key=api_key, model=model)

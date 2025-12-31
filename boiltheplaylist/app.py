@@ -46,6 +46,23 @@ def _load_prompt() -> str:
     return PROMPT_PATH.read_text(encoding="utf-8")
 
 
+def _openai_error_message_from_body(body: bytes) -> str:
+    text = body.decode(errors="replace").strip()
+    if not text:
+        return "Unknown error"
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    if isinstance(payload, dict):
+        error = payload.get("error") or {}
+        if isinstance(error, dict):
+            message = error.get("message")
+            if message:
+                return str(message)
+    return text
+
+
 def _get_redirect_uri(request: Request) -> str:
     configured = os.getenv("SPOTIFY_REDIRECT_URI")
     if configured:
@@ -290,7 +307,7 @@ async def generate_stream(
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY is required")
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    model = os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
 
     async def event_stream():
         def _sse(event: str, data: dict[str, Any]) -> str:
@@ -303,15 +320,21 @@ async def generate_stream(
         }
         payload_body = {
             "model": model,
-            "input": prompt_preview,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt_preview}],
+                }
+            ],
             "instructions": "You are a helpful music curator.",
             "temperature": 0.8,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
+            "text": {
+                "format": {
+                    "type": "json_schema",
                     "name": "boil_playlist",
                     "schema": {
                         "type": "object",
+                        "additionalProperties": False,
                         "properties": {
                             "playlist_title": {"type": "string"},
                             "arc_summary": {"type": "string"},
@@ -319,6 +342,7 @@ async def generate_stream(
                                 "type": "array",
                                 "items": {
                                     "type": "object",
+                                    "additionalProperties": False,
                                     "properties": {
                                         "title": {"type": "string"},
                                         "artist": {"type": "string"},
@@ -338,7 +362,8 @@ async def generate_stream(
                         },
                         "required": ["playlist_title", "arc_summary", "sequence"],
                     },
-                },
+                    "strict": True,
+                }
             },
             "stream": True,
         }
@@ -351,7 +376,16 @@ async def generate_stream(
                 headers=headers,
                 json=payload_body,
             ) as response:
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    body = await response.aread()
+                    message = _openai_error_message_from_body(body)
+                    yield _sse(
+                        "error",
+                        {
+                            "message": f"OpenAI API error ({response.status_code}): {message}"
+                        },
+                    )
+                    return
                 async for line in response.aiter_lines():
                     if not line.startswith("data: "):
                         continue
