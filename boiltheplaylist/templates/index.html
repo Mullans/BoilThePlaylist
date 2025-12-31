@@ -1163,6 +1163,153 @@
         }
       }
 
+      function ensureSequenceLength(total) {
+        if (!state.sequence || state.sequence.length !== total) {
+          state.sequence = Array.from({ length: total }, () => ({}));
+        }
+      }
+
+      function extractJsonStringValue(buffer, key) {
+        const keyIndex = buffer.indexOf(`\"${key}\"`);
+        if (keyIndex === -1) return null;
+        const colonIndex = buffer.indexOf(":", keyIndex);
+        if (colonIndex === -1) return null;
+        let i = colonIndex + 1;
+        while (i < buffer.length && /\s/.test(buffer[i])) i += 1;
+        if (buffer[i] !== "\"") return null;
+        i += 1;
+        let value = "";
+        let escape = false;
+        for (; i < buffer.length; i += 1) {
+          const char = buffer[i];
+          if (escape) {
+            value += char;
+            escape = false;
+            continue;
+          }
+          if (char === "\\") {
+            escape = true;
+            continue;
+          }
+          if (char === "\"") {
+            return value;
+          }
+          value += char;
+        }
+        return null;
+      }
+
+      function createStreamState() {
+        return {
+          buffer: "",
+          sequenceIndex: -1,
+          scanIndex: 0,
+          depth: 0,
+          inString: false,
+          escape: false,
+          itemStart: -1,
+          items: [],
+          playlistTitle: null,
+          arcSummary: null,
+        };
+      }
+
+      function ingestStreamDelta(streamState, delta, total) {
+        streamState.buffer += delta;
+
+        if (!streamState.playlistTitle) {
+          const title = extractJsonStringValue(streamState.buffer, "playlist_title");
+          if (title !== null) {
+            streamState.playlistTitle = title;
+            playlistName.value = title;
+          }
+        }
+        if (!streamState.arcSummary) {
+          const summary = extractJsonStringValue(streamState.buffer, "arc_summary");
+          if (summary !== null) {
+            streamState.arcSummary = summary;
+            arcSummary.textContent = summary;
+          }
+        }
+
+        if (streamState.sequenceIndex === -1) {
+          const keyIndex = streamState.buffer.indexOf("\"sequence\"");
+          if (keyIndex !== -1) {
+            const bracketIndex = streamState.buffer.indexOf("[", keyIndex);
+            if (bracketIndex !== -1) {
+              streamState.sequenceIndex = bracketIndex + 1;
+              streamState.scanIndex = streamState.sequenceIndex;
+            }
+          }
+        }
+
+        if (streamState.sequenceIndex === -1) return;
+        ensureSequenceLength(total);
+
+        const buffer = streamState.buffer;
+        for (let i = streamState.scanIndex; i < buffer.length; i += 1) {
+          const char = buffer[i];
+          if (streamState.inString) {
+            if (streamState.escape) {
+              streamState.escape = false;
+              continue;
+            }
+            if (char === "\\") {
+              streamState.escape = true;
+              continue;
+            }
+            if (char === "\"") {
+              streamState.inString = false;
+            }
+            continue;
+          }
+          if (char === "\"") {
+            streamState.inString = true;
+            continue;
+          }
+          if (char === "{") {
+            if (streamState.depth === 0) {
+              streamState.itemStart = i;
+            }
+            streamState.depth += 1;
+            continue;
+          }
+          if (char === "}") {
+            if (streamState.depth > 0) {
+              streamState.depth -= 1;
+              if (streamState.depth === 0 && streamState.itemStart !== -1) {
+                const itemText = buffer.slice(streamState.itemStart, i + 1);
+                streamState.itemStart = -1;
+                try {
+                  const item = JSON.parse(itemText);
+                  if (item && item.title && item.artist) {
+                    const index = streamState.items.length;
+                    streamState.items.push(item);
+                    const targetIndex = index + 1;
+                    const existing = state.sequence[targetIndex] || {};
+                    state.sequence[targetIndex] = {
+                      ...existing,
+                      ...item,
+                      spotify: existing.spotify || null,
+                      resolved: existing.resolved ?? null,
+                      retryable: existing.retryable ?? false,
+                      manual_override: existing.manual_override ?? false,
+                      original: existing.original || null,
+                    };
+                    renderSlot(targetIndex, state.sequence[targetIndex], false, total);
+                    resolveSlotAtIndex(state.sequence, targetIndex, total);
+                  }
+                } catch (error) {
+                  // Wait for more data to complete the JSON object.
+                }
+              }
+            }
+            continue;
+          }
+        }
+        streamState.scanIndex = buffer.length;
+      }
+
       function showWarningModal(message) {
         warningMessage.textContent = message;
         warningModal.hidden = false;
