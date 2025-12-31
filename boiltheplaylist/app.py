@@ -303,15 +303,21 @@ async def generate_stream(
         }
         payload_body = {
             "model": model,
-            "input": prompt_preview,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt_preview}],
+                }
+            ],
             "instructions": "You are a helpful music curator.",
             "temperature": 0.8,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
+            "text": {
+                "format": {
+                    "type": "json_schema",
                     "name": "boil_playlist",
                     "schema": {
                         "type": "object",
+                        "additionalProperties": False,
                         "properties": {
                             "playlist_title": {"type": "string"},
                             "arc_summary": {"type": "string"},
@@ -319,6 +325,7 @@ async def generate_stream(
                                 "type": "array",
                                 "items": {
                                     "type": "object",
+                                    "additionalProperties": False,
                                     "properties": {
                                         "title": {"type": "string"},
                                         "artist": {"type": "string"},
@@ -338,7 +345,8 @@ async def generate_stream(
                         },
                         "required": ["playlist_title", "arc_summary", "sequence"],
                     },
-                },
+                    "strict": True,
+                }
             },
             "stream": True,
         }

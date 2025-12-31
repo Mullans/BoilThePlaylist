@@ -142,15 +142,21 @@ class OpenAIClient(LLMClient):
         }
         payload = {
             "model": self.model,
-            "input": user_prompt,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": user_prompt}],
+                }
+            ],
             "instructions": "You are a helpful music curator.",
             "temperature": 0.8,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
+            "text": {
+                "format": {
+                    "type": "json_schema",
                     "name": "boil_playlist",
                     "schema": {
                         "type": "object",
+                        "additionalProperties": False,
                         "properties": {
                             "playlist_title": {"type": "string"},
                             "arc_summary": {"type": "string"},
@@ -158,6 +164,7 @@ class OpenAIClient(LLMClient):
                                 "type": "array",
                                 "items": {
                                     "type": "object",
+                                    "additionalProperties": False,
                                     "properties": {
                                         "title": {"type": "string"},
                                         "artist": {"type": "string"},
@@ -177,7 +184,8 @@ class OpenAIClient(LLMClient):
                         },
                         "required": ["playlist_title", "arc_summary", "sequence"],
                     },
-                },
+                    "strict": True,
+                }
             },
         }
 
