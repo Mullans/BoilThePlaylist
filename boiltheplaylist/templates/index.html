@@ -753,6 +753,8 @@
       let lastSequence = [];
       let lastExpectedCount = 0;
       let lastLlmCount = 0;
+      let spotifyConnected = false;
+      const inFlightResolves = new Set();
       let replaceIndex = null;
 
       const STORAGE_KEY = "boiltheplaylist_state";
@@ -889,14 +891,17 @@
             connectButton.textContent = "Connect Spotify";
             connectButton.classList.add("connect");
             connectButton.classList.remove("disconnect");
+            spotifyConnected = false;
             return;
           }
           showStatus(`Connected as ${profile.display_name || profile.id}`);
           connectButton.textContent = "Disconnect Spotify";
           connectButton.classList.remove("connect");
           connectButton.classList.add("disconnect");
+          spotifyConnected = true;
         } catch (error) {
           showStatus("Spotify not connected");
+          spotifyConnected = false;
         }
       }
 
@@ -908,9 +913,11 @@
               connectButton.textContent = "Connect Spotify";
               connectButton.classList.add("connect");
               connectButton.classList.remove("disconnect");
+              spotifyConnected = false;
             })
             .catch(() => {
               showStatus("Spotify not connected");
+              spotifyConnected = false;
             });
           return;
         }
@@ -1139,7 +1146,7 @@
           index === 0 ? "Start" : index === total - 1 ? "End" : "",
           meta
         );
-        if (slot.retryable || slot.resolved === false) {
+        if (slot.retryable || (markMissing && slot.resolved === false)) {
           const row = playlistEl.children[index];
           if (slot.resolved === false && !slot.retryable && markMissing) {
             row.querySelector(".track-sub").textContent =
@@ -1421,6 +1428,7 @@
       }
 
       async function resolveMissingSlots(sequence, total, skipFailed = false) {
+        if (!spotifyConnected) return false;
         let resolveHadError = false;
         const resolvePromises = sequence.map((slot, index) => {
           if (!slot || !slot.title || !slot.artist) return Promise.resolve();
@@ -1473,6 +1481,54 @@
         await Promise.allSettled(resolvePromises);
         saveState();
         return resolveHadError;
+      }
+
+      async function resolveSlotAtIndex(sequence, index, total) {
+        if (!spotifyConnected) return;
+        if (inFlightResolves.has(index)) return;
+        const slot = sequence[index];
+        if (!slot || !slot.title || !slot.artist) return;
+        if (slot.spotify) return;
+        inFlightResolves.add(index);
+        setRowResolving(index, true);
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), 12000);
+        try {
+          const response = await fetch("/api/resolve-one", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: slot.title, artist: slot.artist }),
+            signal: controller.signal,
+          });
+          window.clearTimeout(timeoutId);
+          if (!response.ok) {
+            throw new Error("Spotify resolve failed");
+          }
+          const resolved = await response.json();
+          sequence[index] = {
+            ...slot,
+            spotify: resolved.spotify,
+            resolved: resolved.resolved,
+            retryable: false,
+          };
+          lastSequence = sequence;
+          renderSlot(index, sequence[index], true, total);
+        } catch (error) {
+          sequence[index] = {
+            ...slot,
+            spotify: null,
+            resolved: false,
+            retryable: true,
+          };
+          const row = playlistEl.children[index];
+          if (row) {
+            row.classList.add("error");
+          }
+        } finally {
+          setRowResolving(index, false);
+          inFlightResolves.delete(index);
+          saveState();
+        }
       }
 
       function updateRow(index, track, badgeText, meta = {}) {
@@ -1561,6 +1617,28 @@
         };
         lastPayload = payload;
         renderPlaceholders();
+        const total = count + 2;
+        ensureSequenceLength(total);
+        if (state.startTrack) {
+          state.sequence[0] = {
+            ...state.sequence[0],
+            title: state.startTrack.name,
+            artist: state.startTrack.artist,
+            spotify: state.startTrack,
+            resolved: true,
+            retryable: false,
+          };
+        }
+        if (state.endTrack) {
+          state.sequence[total - 1] = {
+            ...state.sequence[total - 1],
+            title: state.endTrack.name,
+            artist: state.endTrack.artist,
+            spotify: state.endTrack,
+            resolved: true,
+            retryable: false,
+          };
+        }
         setLoadingState(true);
         arcSummary.textContent = "Generating transition arc...";
         rawInput.textContent = "Preparing prompt...";
@@ -1581,7 +1659,7 @@
           const decoder = new TextDecoder();
           let buffer = "";
           let fullText = "";
-          const total = count + 2;
+          const streamState = createStreamState();
           while (true) {
             const { value, done } = await reader.read();
             if (done) break;
@@ -1609,6 +1687,7 @@
                 if (!delta) continue;
                 fullText += delta;
                 rawOutput.textContent = fullText;
+                ingestStreamDelta(streamState, delta, total);
               } else if (event === "error") {
                 throw new Error(payloadEvent.message || "LLM error");
               } else if (event === "done") {
@@ -1631,23 +1710,49 @@
           if (!parsedJson || !parsedJson.sequence) {
             throw new Error("Failed to parse structured JSON response.");
           }
-          state.sequence = parsedJson.sequence.map((slot) => ({
-            ...slot,
-            spotify: slot.spotify || null,
-            resolved: slot.resolved ?? false,
-            retryable: false,
-            manual_override: false,
-            original: slot.original || null,
-          }));
+          ensureSequenceLength(total);
+          parsedJson.sequence.forEach((slot, index) => {
+            const targetIndex = index + 1;
+            const existing = state.sequence[targetIndex] || {};
+            state.sequence[targetIndex] = {
+              ...existing,
+              ...slot,
+              spotify: existing.spotify || slot.spotify || null,
+              resolved: existing.resolved ?? slot.resolved ?? null,
+              retryable: existing.retryable ?? false,
+              manual_override: existing.manual_override ?? false,
+              original: existing.original || slot.original || null,
+            };
+          });
+          if (state.startTrack) {
+            state.sequence[0] = {
+              ...state.sequence[0],
+              title: state.startTrack.name,
+              artist: state.startTrack.artist,
+              spotify: state.startTrack,
+              resolved: true,
+              retryable: false,
+            };
+          }
+          if (state.endTrack) {
+            state.sequence[total - 1] = {
+              ...state.sequence[total - 1],
+              title: state.endTrack.name,
+              artist: state.endTrack.artist,
+              spotify: state.endTrack,
+              resolved: true,
+              retryable: false,
+            };
+          }
           lastSequence = state.sequence;
           lastExpectedCount = count;
           lastLlmCount = parsedJson.sequence.length;
           applySequence(state.sequence, null, false);
 
-          const expectedTotal = count + 2;
+          const expectedTotal = count;
           if (lastLlmCount !== expectedTotal) {
             showWarningModal(
-              `The LLM returned ${lastLlmCount} tracks instead of ${expectedTotal}. Try again or keep going?`
+              `The LLM returned ${lastLlmCount} intermediate tracks instead of ${expectedTotal}. Try again or keep going?`
             );
             exportButton.disabled = false;
             saveState();
@@ -1659,9 +1764,9 @@
             total,
             false
           );
-          const missingAfterResolve = state.sequence.filter(
-            (slot) => slot && slot.resolved === false
-          );
+          const missingAfterResolve = state.sequence
+            .slice(1, -1)
+            .filter((slot) => slot && slot.resolved === false);
           if (missingAfterResolve.length) {
             showWarningModal(
               `${missingAfterResolve.length} track(s) could not be matched on Spotify. Try again or keep going?`
@@ -1744,8 +1849,7 @@
       keepButton.addEventListener("click", () => {
         hideWarningModal();
         if (!lastSequence.length) return;
-        const actualCount = Math.max(lastLlmCount - 2, 1);
-        document.getElementById("count").value = actualCount;
+        const actualCount = Math.max(lastLlmCount, 1);
         applySequence(lastSequence, actualCount, true);
         resolveMissingSlots(lastSequence, actualCount + 2, true);
         saveState();
