@@ -375,5 +375,5 @@ def get_llm_client() -> LLMClient:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("OPENAI_API_KEY is required")
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    model = os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
     return OpenAIClient(api_key=api_key, model=model)

@@ -307,7 +307,7 @@ async def generate_stream(
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY is required")
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    model = os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
 
     async def event_stream():
         def _sse(event: str, data: dict[str, Any]) -> str:
